@@ -1,0 +1,1022 @@
+---
+title: "Government Financial Statistics Summary"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+    theme: readable
+    source_code: embed
+    social: menu
+    navbar:
+      - {title: "UN Comtrade", href: "https://comtrade.un.org/data/", icon: "far fa-landmark"}
+
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(readxl)
+library(ggrepel)
+library(shiny)
+library(plotly)
+library(scales)
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+## Importing GFS DATA
+setwd("C:/Users/amoeaki/Downloads")
+gfs_raw <- read.csv("GFS_data.csv")
+
+#CSV file messed up headings
+#renaming headings to be proper
+names(gfs_raw) <- names(gfs_raw) %>%
+  str_trim()
+
+#Remove X in headings, replace "." with " ".
+names(gfs_raw) <- names(gfs_raw) |>
+  stringr::str_remove("^X")
+names(gfs_raw) <- gsub("\\.", " ", names(gfs_raw))
+
+# Renaming headings to use underscore 
+names(gfs_raw)[names(gfs_raw) == "GFS Code"] <- "GFS_Code"
+names(gfs_raw)[names(gfs_raw) == "Parent Code"] <- "Parent_Code"
+# ADD FY infront of years FY20xx
+names(gfs_raw)[names(gfs_raw) %in% as.character(2018:2026)] <-
+  paste0("FY", 2018:2026)
+gfs_raw <- gfs_raw %>%
+  mutate(
+    across(starts_with("FY"), as.numeric)
+  )
+
+
+##Convert to long format
+gfs_long <- gfs_raw %>%
+  
+  pivot_longer(
+    cols = matches("^FY?20(18|19|20|21|22|23|24|25|26)$"),
+    names_to = "FiscalYear",
+    values_to = "Amount"
+  ) %>%
+  
+  mutate(
+    
+    # Remove FY if present
+    FiscalYear = as.numeric(
+      str_remove(FiscalYear, "^FY")
+    ),
+    
+    # Ensure amount is numeric
+    Amount = as.numeric(Amount)
+    
+  )
+
+gfs_long <- gfs_long %>%
+  
+  mutate(
+    
+    GFS_Code = as.character(GFS_Code),
+    
+    Parent_Code = as.character(Parent_Code),
+    
+    Category = as.character(Category),
+    
+    Level = as.numeric(Level)
+    
+  )
+
+
+major_categories <- gfs_long %>%
+  
+  filter(Level == 1) %>%
+  
+  distinct(
+    GFS_Code,
+    Category
+  ) %>%
+  
+  arrange(GFS_Code)
+
+
+
+# Adding Dashboard Hiearchy to include Debt Financing, Grants, fiscal Balance
+
+dashboard_categories <- tribble(
+
+  ~Dashboard_Code, ~Dashboard_Category,
+
+  "REV",  "Revenue",
+  "EXP",  "Expense",
+  "GR",   "Grants",
+  "DEBT", "Debt Financing",
+  "FB",   "Fiscal Balance"
+
+)
+
+
+# ============================================================
+# DASHBOARD COMPONENT MAPPING
+#
+# Maps dashboard categories to the existing GFS codes.
+# ============================================================
+
+dashboard_mapping <- tribble(
+
+  ~Dashboard_Code, ~GFS_Code, ~Component,
+
+  # ----------------------------------------------------------
+  # REVENUE
+  # ----------------------------------------------------------
+
+  "REV", "11", "Taxes",
+  "REV", "13", "Grants",
+  "REV", "14", "Other revenue",
+
+
+  # ----------------------------------------------------------
+  # EXPENSE
+  # ----------------------------------------------------------
+
+  "EXP", "21", "Compensation of employees",
+  "EXP", "22", "Use of goods and services",
+  "EXP", "24", "Interest",
+  "EXP", "25", "Subsidies",
+  "EXP", "26", "Grants",
+  "EXP", "27", "Social benefits",
+  "EXP", "28", "Other expense",
+
+
+  # ----------------------------------------------------------
+  # GRANTS
+  #
+  # Revenue grants = GFS 13
+  # Expenditure grants = GFS 26
+  # ----------------------------------------------------------
+
+  "GR", "13", "Grants received",
+  "GR", "26", "Grants paid",
+
+
+  # ----------------------------------------------------------
+  # DEBT FINANCING
+  #
+  # Existing GFS financial liability codes
+  # ----------------------------------------------------------
+
+  "DEBT", "3314", "Domestic loans",
+  "DEBT", "3315", "Domestic repayments",
+  "DEBT", "3324", "Foreign loans",
+  "DEBT", "3328", "Foreign repayments"
+
+)
+
+
+# ============================================================
+# CREATE DASHBOARD LONG DATASET
+#
+# This takes the existing GFS observations and attaches
+# the dashboard category to them.
+# ============================================================
+
+dashboard_long <- dashboard_mapping %>%
+
+  left_join(
+    gfs_long,
+    by = "GFS_Code"
+  ) %>%
+
+  select(
+    Dashboard_Code,
+    GFS_Code,
+    Component,
+    Category,
+    Parent_Code,
+    Level,
+    FiscalYear,
+    Amount
+  )
+
+
+# ============================================================
+# FISCAL BALANCE
+#
+# Net Lending/Borrowing Requirement is already contained
+# in the GFS data, but does not have a GFS code.
+#
+# We therefore create a dashboard observation for it.
+# ============================================================
+
+fiscal_balance <- gfs_long %>%
+
+  filter(
+    Category == "Net Lending/Borrowing Requirement"
+  ) %>%
+
+  select(
+    FiscalYear,
+    Amount
+  ) %>%
+
+  mutate(
+
+    Dashboard_Code = "FB",
+
+    GFS_Code = "NLBR",
+
+    Component = "Net Lending/Borrowing Requirement",
+
+    Category = "Fiscal Balance",
+
+    Parent_Code = NA_character_,
+
+    Level = 1
+
+  )
+
+
+# ============================================================
+# ADD FISCAL BALANCE TO DASHBOARD DATA
+# ============================================================
+
+dashboard_long <- bind_rows(
+
+  dashboard_long,
+
+  fiscal_balance %>%
+
+    select(
+      Dashboard_Code,
+      GFS_Code,
+      Component,
+      Category,
+      Parent_Code,
+      Level,
+      FiscalYear,
+      Amount
+    )
+
+)
+
+
+
+# ============================================================
+# 6. CREATE LABELS FOR DROPDOWN
+# ============================================================
+
+category_choices <- setNames(
+  major_categories$GFS_Code,
+  major_categories$Category
+)
+
+
+# ============================================================
+# 7. YEARS AVAILABLE
+# ============================================================
+
+available_years <- sort(
+  unique(gfs_long$FiscalYear)
+)
+
+
+
+
+```
+
+
+Input {.sidebar data-width=250}
+-----------------------------------------------------------------------
+
+Projection Vintage Settings
+
+```{r}
+
+# ============================================================
+# MAIN GFS CATEGORY
+# ============================================================
+
+selectInput(
+  
+  inputId = "selected_category",
+  
+  label = "Category",
+  
+  choices = category_choices,
+  
+  selected = major_categories$GFS_Code[1]
+  
+)
+
+
+# ============================================================
+# FISCAL YEAR
+# ============================================================
+
+selectInput(
+  
+  inputId = "selected_year",
+  
+  label = "Fiscal Year",
+  
+  choices = available_years,
+  
+  selected = max(available_years),
+  
+  width = "100%"
+  
+)
+
+
+# selectInput( 
+#   inputId = "latest_vintage", label = "Latest budget vintage", 
+#   choices = c("Budget 2025", "Budget 2026"), selected = "Budget 2026" ) 
+# 
+# checkboxInput( 
+#   inputId = "show_prior", label = "Show prior budget vintages", 
+#   value = TRUE ) 
+# 
+# checkboxInput( 
+#   inputId = "show_outturn", 
+#   label = "Show actual outturn", 
+#   value = TRUE ) 
+# 
+# sliderInput( 
+#   inputId = "start_year", 
+#   label = "Start fiscal year", 
+#   min = 2014, max = 2026, value = 2018, step = 1 ) 
+# 
+# sliderInput( 
+#   inputId = "end_year", 
+#   label = "End fiscal year", 
+#   min = 2018, max = 2028, value = 2028, step = 1 )
+
+```
+
+Current Selection
+
+```{r}
+
+renderText({
+  
+  selected_name <- major_categories %>%
+    filter(
+      GFS_Code == input$selected_category
+    ) %>%
+    pull(GFS_Category)
+  
+  paste(
+    "Viewing:",
+    selected_name,
+    "— FY",
+    input$selected_year
+  )
+  
+})
+
+
+```
+
+Interactive summary plots of Tonga's GFS
+
+Forecasting vintages show Tonga's recent forecasts have been underestimating against the actual outturns
+
+
+Row {data-height=180}
+-----------------------------------------------------------------------
+### Total
+
+```{r}
+
+renderValueBox({
+  
+  selected_data <- gfs_long %>%
+    filter(
+      GFS_Code == input$selected_category,
+      FiscalYear == as.numeric(input$selected_year)
+    )
+  
+  value <- selected_data %>%
+    pull(Amount)
+  
+  category_name <- selected_data %>%
+    pull(Category)
+  
+  
+  if (
+    length(value) == 0 ||
+    is.na(value)
+  ) {
+    
+    display_value <- "N/A"
+    
+  } else {
+    
+    display_value <- paste0(
+      "$",
+      comma(
+        value,
+        accuracy = 0.1
+      ),
+      "m"
+    )
+    
+  }
+  
+  
+  valueBox(
+    
+    value = display_value,
+    
+    caption = paste(
+      category_name,
+      "— FY",
+      input$selected_year
+    ),
+    
+    icon = "fa-money",
+    
+    color = "primary"
+    
+  )
+  
+})
+
+
+#renderValueBox({
+  
+#  selected <- paste0("FY", input$selected_year)
+
+#  revenue_value <- outturn %>%
+#    filter(FiscalYear == selected) %>%
+#    pull(Outturn)
+
+#  valueBox(
+#    value = paste0("$", scales::comma(revenue_value, accuracy = 0.1), "m"),
+#    caption = paste("Total Revenue —", selected),
+#    icon = "fa-money",
+#    color = "primary"
+#  )
+#})
+
+
+```
+
+
+
+### Number of Components
+
+```{r fig1}
+
+renderValueBox({
+  
+  component_count <- gfs_long %>%
+    
+    filter(
+      Parent_Code == input$selected_category,
+      FiscalYear == as.numeric(input$selected_year)
+    ) %>%
+    
+    nrow()
+  
+  
+  valueBox(
+    
+    value = component_count,
+    
+    caption = "Major Components",
+    
+    icon = "fa-list",
+    
+    color = "info"
+    
+  )
+  
+})
+
+```  
+
+### Selected Year
+
+```{r}
+renderValueBox({
+  
+  valueBox(
+    
+    value = paste0(
+      "FY",
+      input$selected_year
+    ),
+    
+    caption = "Selected Fiscal Year",
+    
+    icon = "fa-calendar",
+    
+    color = "success"
+    
+  )
+  
+})
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Row {data-height=550}
+-----------------------------------------------------------------------
+
+### Bar Chart
+
+```{r middle_charts}
+ renderPlotly({
+ 
+   selected_year <- as.numeric(input$selected_year)
+   selected_code <- as.character(input$selected_category)
+ 
+   # Get the components of the selected GFS category
+   component_data <- gfs_long %>%
+     filter(
+       Parent_Code == selected_code,
+       FiscalYear == selected_year,
+       !is.na(Amount)
+     ) %>%
+     arrange(Amount)
+ 
+   # Get category name
+   category_name <- gfs_long %>%
+     filter(GFS_Code == selected_code) %>%
+     pull(Category) %>%
+     unique()
+ 
+   # If there is no data
+   if (nrow(component_data) == 0) {
+ 
+     return(
+       plot_ly() %>%
+         layout(
+           title = "No component data available"
+         )
+     )
+ 
+   }
+ 
+   # Plot directly with Plotly
+   plot_ly(
+     component_data,
+     x = ~Amount,
+     y = ~reorder(Category, Amount),
+     type = "bar",
+     orientation = "h",
+     text = ~paste0(
+       Category,
+       "<br>$",
+       comma(Amount, accuracy = 0.1),
+       "m"
+     ),
+     hoverinfo = "text"
+   ) %>%
+ 
+     layout(
+       title = paste(
+         category_name[1],
+         "— FY",
+         selected_year
+       ),
+ 
+       xaxis = list(
+         title = "$ million"
+       ),
+ 
+       yaxis = list(
+         title = ""
+       )
+     )
+ 
+ })
+
+# output$category_bar <- renderPlotly({
+# 
+#   selected_year <- as.numeric(input$selected_year)
+#   selected_code <- as.character(input$selected_category)
+# 
+#   component_data <- gfs_long %>%
+#     filter(
+#       Parent_Code == selected_code,
+#       FiscalYear == selected_year,
+#       !is.na(Amount)
+#     ) %>%
+#     arrange(Amount)
+# 
+#   category_name <- gfs_long %>%
+#     filter(GFS_Code == selected_code) %>%
+#     pull(Category) %>%
+#     unique()
+# 
+#   if (nrow(component_data) == 0) {
+# 
+#     return(
+#       plot_ly() %>%
+#         layout(
+#           title = "No component data available"
+#         )
+#     )
+# 
+#   }
+# 
+#   plot_ly(
+#     component_data,
+#     x = ~Amount,
+#     y = ~reorder(Category, Amount),
+#     type = "bar",
+#     orientation = "h",
+#     text = ~paste0(
+#       Category,
+#       "<br>$",
+#       comma(Amount, accuracy = 0.1),
+#       "m"
+#     ),
+#     hoverinfo = "text"
+#   ) %>%
+# 
+#     layout(
+#       title = paste(
+#         category_name[1],
+#         "— FY",
+#         selected_year
+#       ),
+#       xaxis = list(
+#         title = "$ million"
+#       ),
+#       yaxis = list(
+#         title = ""
+#       )
+#     )
+# 
+# })
+
+# 
+#  renderPlotly({
+#  
+#    selected_year <- as.numeric(input$selected_year)
+#    selected_code <- as.character(input$selected_category)
+#  
+#    # Get the components of the selected GFS category
+#    component_data <- gfs_long %>%
+#      filter(
+#        Parent_Code == selected_code,
+#        FiscalYear == selected_year,
+#        !is.na(Amount)
+#      ) %>%
+#      arrange(Amount)
+#  
+#    # Get category name
+#    category_name <- gfs_long %>%
+#      filter(GFS_Code == selected_code) %>%
+#      pull(Category) %>%
+#      unique()
+#  
+#    # If there is no data
+#    if (nrow(component_data) == 0) {
+#  
+#      return(
+#        plot_ly() %>%
+#          layout(
+#            title = "No component data available"
+#          )
+#      )
+#  
+#    }
+#  
+#    # Plot directly with Plotly
+#    plot_ly(
+#      component_data,
+#      x = ~Amount,
+#      y = ~reorder(Category, Amount),
+#      type = "bar",
+#      orientation = "h",
+#      text = ~paste0(
+#        Category,
+#        "<br>$",
+#        comma(Amount, accuracy = 0.1),
+#        "m"
+#      ),
+#      hoverinfo = "text"
+#    ) %>%
+#  
+#      layout(
+#        title = paste(
+#          category_name[1],
+#          "— FY",
+#          selected_year
+#        ),
+#  
+#        xaxis = list(
+#          title = "$ million"
+#        ),
+#  
+#        yaxis = list(
+#          title = ""
+#        )
+#      )
+#  
+#  })
+
+# renderPlotly({
+#   
+#   selected_year <- as.numeric(
+#     input$selected_year
+#   )
+#   
+#   
+#   # ------------------------------------------------------------
+#   # Get immediate children of selected category
+#   # ------------------------------------------------------------
+#   
+#   pie_data <- gfs_long %>%
+#     
+#     filter(
+#       Parent_Code == input$selected_category,
+#       FiscalYear == selected_year
+#     ) %>%
+#     
+#     filter(
+#       !is.na(Amount),
+#       Amount != 0
+#     )
+#   
+#   
+#   # ------------------------------------------------------------
+#   # Calculate percentage
+#   # ------------------------------------------------------------
+#   
+#   pie_data <- pie_data %>%
+#     
+#     mutate(
+#       
+#       Percentage =
+#         Amount /
+#         sum(Amount) *
+#         100
+#       
+#     )
+#   
+#   
+#   # ------------------------------------------------------------
+#   # Pie chart
+#   # ------------------------------------------------------------
+#   
+#   plot_ly(
+#     
+#     pie_data,
+#     
+#     labels = ~Category,
+#     
+#     values = ~Amount,
+#     
+#     type = "pie",
+#     
+#     textinfo = "label+percent",
+#     
+#     hovertemplate =
+#       paste0(
+#         "<b>%{label}</b>",
+#         "<br>$%{value:.1f}m",
+#         "<br>%{percent}",
+#         "<extra></extra>"
+#       )
+#     
+#   ) %>%
+#     
+#     layout(
+#       
+#       title = list(
+#         text = paste(
+#           "Composition — FY",
+#           selected_year
+#         )
+#       )
+#       
+#     )
+#   
+# })
+
+```
+
+### Composition of Category
+
+```{r pie}
+ 
+ renderPlotly({
+
+   selected_year <- as.numeric(
+     input$selected_year
+   )
+
+
+   # ------------------------------------------------------------
+   # Get immediate children of selected category
+   # ------------------------------------------------------------
+
+   pie_data <- gfs_long %>%
+
+     filter(
+       Parent_Code == input$selected_category,
+       FiscalYear == selected_year
+     ) %>%
+
+     filter(
+       !is.na(Amount),
+       Amount != 0
+     )
+
+
+   # ------------------------------------------------------------
+   # Calculate percentage
+   # ------------------------------------------------------------
+
+   pie_data <- pie_data %>%
+
+     mutate(
+
+       Percentage =
+         Amount /
+         sum(Amount) *
+         100
+
+     )
+
+
+   # ------------------------------------------------------------
+   # Pie chart
+   # ------------------------------------------------------------
+
+   plot_ly(
+
+     pie_data,
+
+     labels = ~Category,
+
+     values = ~Amount,
+
+     type = "pie",
+
+     textinfo = "label+percent",
+
+     hovertemplate =
+       paste0(
+         "<b>%{label}</b>",
+         "<br>$%{value:.1f}m",
+         "<br>%{percent}",
+         "<extra></extra>"
+       )
+
+   ) %>%
+
+     layout(
+
+       title = list(
+         text = paste(
+           "Composition — FY",
+           selected_year
+         )
+       )
+
+     )
+
+ })
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Row {data-height=450}
+-----------------------------------------------------------------------
+
+### Historical Trend
+
+```{r}
+
+renderPlotly({
+
+  selected_code <- as.character(input$selected_category)
+
+  # Get historical observations
+  historical_data <- gfs_long %>%
+    filter(
+      GFS_Code == selected_code,
+      !is.na(Amount)
+    ) %>%
+    arrange(FiscalYear)
+
+  # Get category name
+  category_name <- historical_data %>%
+    pull(Category) %>%
+    unique()
+
+  # No data check
+  if (nrow(historical_data) == 0) {
+
+    return(
+      plot_ly() %>%
+        layout(
+          title = "No historical data available"
+        )
+    )
+
+  }
+
+  # Direct Plotly chart
+  plot_ly(
+    historical_data,
+    x = ~FiscalYear,
+    y = ~Amount,
+    type = "scatter",
+    mode = "lines+markers",
+    text = ~paste0(
+      "FY",
+      FiscalYear,
+      "<br>",
+      category_name[1],
+      ": $",
+      comma(Amount, accuracy = 0.1),
+      "m"
+    ),
+    hoverinfo = "text"
+  ) %>%
+
+    layout(
+
+      title = paste(
+        category_name[1],
+        "Over Time"
+      ),
+
+      xaxis = list(
+        title = "",
+        tickmode = "array",
+        tickvals = historical_data$FiscalYear,
+        ticktext = paste0(
+          "FY",
+          historical_data$FiscalYear
+        )
+      ),
+
+      yaxis = list(
+        title = "$ million"
+      )
+
+    )
+
+})
+
+```
